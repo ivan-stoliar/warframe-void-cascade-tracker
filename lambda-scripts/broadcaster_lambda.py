@@ -2,7 +2,6 @@ import json
 import os
 import urllib.request
 from datetime import datetime, timezone
-from urllib.error import HTTPError
 
 # 1. Configuration
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -21,10 +20,8 @@ def send_telegram_message(chat_id, text):
 def supabase_request(endpoint, method='GET', payload=None):
     url = f"{SUPABASE_URL}/rest/v1/{endpoint}"
     headers = {
-        'apikey': SUPABASE_KEY,
-        'Authorization': f"Bearer {SUPABASE_KEY}",
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation'
+        'apikey': SUPABASE_KEY, 'Authorization': f"Bearer {SUPABASE_KEY}",
+        'Content-Type': 'application/json', 'Prefer': 'return=representation'
     }
     data = json.dumps(payload).encode('utf-8') if payload else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -43,11 +40,10 @@ def calculate_eta(expiry_str):
         minutes = int(diff.total_seconds() // 60)
         if minutes <= 0: return "Expiring soon"
         return f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
-    except:
-        return "Active"
+    except: return "Active"
 
 def lambda_handler(event, context):
-    # 2. Fetch PC Fissures with Browser Spoofing
+    # 2. Fetch PC Fissures
     api_url = "https://api.warframestat.us/pc/fissures"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/119.0.0.0'}
 
@@ -56,7 +52,7 @@ def lambda_handler(event, context):
         with urllib.request.urlopen(req) as response:
             fissures = json.loads(response.read().decode('utf-8'))
     except Exception as e:
-        print(f"API Error (Possible 403): {e}")
+        print(f"API Error: {e}")
         return {'statusCode': 403}
 
     # 3. Filter for Void Cascade (Tuvul Commons)
@@ -69,17 +65,29 @@ def lambda_handler(event, context):
         if supabase_request(f"alert_history?fissure_id=eq.{f_id}"):
             continue
 
-        # 5. Build Data & Check Steel Path
+        # 5. HIGH-ACCURACY Steel Path Detection
+        # We check flags, text, AND Enemy Level (Steel Path is always 100+)
+        is_sp = (
+            f.get('isHard') is True or
+            f.get('hard') is True or
+            "Steel Path" in f.get('tier', '') or
+            "Hard" in f.get('missionKey', '') or
+            f.get('minEnemyLevel', 0) >= 100  # THE ULTIMATE LEVEL CHECK
+        )
+
+        # DEBUG LOG: See what the levels are
+        print(f"DEBUG - ID: {f_id} | Levels: {f.get('minEnemyLevel')}-{f.get('maxEnemyLevel')} | SP Detected: {is_sp}")
+
         node = f.get('node', 'Tuvul Commons')
         tier = f.get('tier', 'Unknown')
         enemy = f.get('enemy', 'Unknown')
-        is_sp = f.get('isHard', False) or f.get('hard', False)
         eta = calculate_eta(f.get('expiry'))
 
         # 6. Format Message
-        mode_header = "🚨 <b>STEEL PATH: VOID CASCADE</b> 🚨" if is_sp else "🚨 <b>VOID CASCADE ACTIVE</b> 🚨"
+        header = "🚨 <b>STEEL PATH: VOID CASCADE</b> 🚨" if is_sp else "🚨 <b>VOID CASCADE ACTIVE</b> 🚨"
+
         message = (
-            f"{mode_header}\n\n"
+            f"{header}\n\n"
             f"📍 <b>Node:</b> {node}\n"
             f"👾 <b>Faction:</b> {enemy}\n"
             f"💎 <b>Tier:</b> {tier} Relics\n"
@@ -93,7 +101,7 @@ def lambda_handler(event, context):
             "fissure_tier": tier,
             "node": node,
             "enemy_faction": enemy,
-            "is_steel_path": is_sp,
+            "is_steel_path": bool(is_sp),
             "activation_time": f.get('activation'),
             "expiry_time": f.get('expiry')
         })
