@@ -1,27 +1,30 @@
-
 import json
 import os
 import urllib.request
+import logging
 from urllib.error import HTTPError
 
-# 1. Grab your secret keys from AWS Environment Variables
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
+SUPABASE_URL = os.environ['SUPABASE_URL']
+SUPABASE_KEY = os.environ['SUPABASE_KEY']
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
 def send_telegram_message(chat_id, text):
-    """Sends a message back to the user via Telegram."""
     data = json.dumps({"chat_id": chat_id, "text": text}).encode('utf-8')
     req = urllib.request.Request(TELEGRAM_API_URL, data=data, headers={'Content-Type': 'application/json'})
     try:
         urllib.request.urlopen(req)
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8')
+        logger.error(f"Telegram HTTP Error: {e.code} - {error_body}")
     except Exception as e:
-        print(f"Telegram error: {e}")
+        logger.error(f"General Telegram error: {e}")
 
 def supabase_request(endpoint, method='GET', payload=None):
-    """Handles REST API calls to your Supabase database."""
     url = f"{SUPABASE_URL}/rest/v1/{endpoint}"
     headers = {
         'apikey': SUPABASE_KEY,
@@ -36,20 +39,19 @@ def supabase_request(endpoint, method='GET', payload=None):
     try:
         with urllib.request.urlopen(req) as response:
             return json.loads(response.read().decode('utf-8'))
-    except HTTPError as e:
-        print(f"Supabase error: {e.read().decode()}")
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8')
+        logger.error(f"Supabase HTTP error: {e.code} - {error_body}")
         return None
     except Exception as e:
-        print(f"Supabase request failed: {e}")
+        logger.error(f"Supabase request failed: {e}")
         return None
 
 def lambda_handler(event, context):
-    """The main brain of the AWS Lambda function."""
     try:
-        # Parse the incoming message from Telegram
+
         body = json.loads(event.get('body', '{}'))
 
-        # Ignore non-message events
         if 'message' not in body:
             return {'statusCode': 200, 'body': 'OK'}
 
@@ -58,13 +60,13 @@ def lambda_handler(event, context):
         text = message.get('text', '').strip()
         username = message['chat'].get('username', 'Unknown')
 
-        # --- COMMAND: /start ---
+        # /start
         if text == '/start':
-            # Check if user already exists in the database
+
             user_check = supabase_request(f"subscribers?chat_id=eq.{chat_id}")
 
             if not user_check:
-                # Insert brand new user as inactive
+
                 new_user = {
                     "chat_id": chat_id,
                     "tg_username": username,
@@ -85,7 +87,7 @@ def lambda_handler(event, context):
 
             send_telegram_message(chat_id, welcome_text)
 
-        # --- COMMAND: /redeem ---
+        # /redeem
         elif text.startswith('/redeem'):
             parts = text.split()
             if len(parts) < 2:
@@ -94,23 +96,25 @@ def lambda_handler(event, context):
 
             code = parts[1]
 
-            # Look up the code in the database
+            user_check = supabase_request(f"subscribers?chat_id=eq.{chat_id}")
+            if not user_check:
+                send_telegram_message(chat_id, "Please type /start first to register your account before redeeming a code!")
+                return {'statusCode': 200, 'body': 'OK'}
+
+
             code_check = supabase_request(f"access_codes?code=eq.{code}&is_used=eq.false")
 
             if code_check:
                 code_data = code_check[0]
                 code_type = code_data.get('code_type', '')
 
-                # Check if the word "lifetime" is in the code_type
                 is_perm = 'lifetime' in code_type
 
-                # Mark code as used
                 supabase_request(f"access_codes?id=eq.{code_data['id']}", method='PATCH', payload={
                     "is_used": True,
                     "redeemed_chat_id": chat_id
                 })
 
-                # Update the subscriber's status AND their permanent flag
                 supabase_request(f"subscribers?chat_id=eq.{chat_id}", method='PATCH', payload={
                     "status": "active",
                     "is_permanent": is_perm
@@ -120,19 +124,17 @@ def lambda_handler(event, context):
             else:
                 send_telegram_message(chat_id, "❌ Invalid or already used code.")
 
-        # --- UNKNOWN COMMAND ---
         else:
             send_telegram_message(chat_id, "I only understand /start and /redeem right now!")
 
-        # Always return a 200 success code so Telegram doesn't keep retrying
         return {
             'statusCode': 200,
             'body': json.dumps('Success')
         }
 
     except Exception as e:
-        print(f"Critical System Error: {str(e)}")
+        logger.error(f"Critical System Error: {str(e)}")
         return {
-            'statusCode': 500,
-            'body': json.dumps('Error processing request')
+           'statusCode': 200,
+            'body': json.dumps('Error processed securely')
         }
